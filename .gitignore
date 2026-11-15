@@ -15,7 +15,10 @@ proc_mouth_roi/
 .idea/
 test_Reverb_*
 log_data_generator.log
-speaker_pairs.json
+speaker_pairs*
 mouth_roi_test_dataset/
 *.h5
 dummy.py
+EvalIRM/
+SMALL_AZIMUTH_TESTS.md
+*.json

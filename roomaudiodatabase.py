@@ -7,7 +7,11 @@ import random
 import librosa
 from tools.tools import plot_room_2d, plot_signal_at_microphones, get_gender_category, plot_stft
 import matplotlib.pyplot as plt
-from pyroomacoustics.directivities import MeasuredDirectivityFile, Rotation3D
+
+
+TARGET_RADIUS_BOUNDS = (1.0, 2.1)
+INTERFERER_RADIUS_BOUNDS = (1.0, 3.5)
+INTERFERER_AZIMUTH_RANGE = (121, 421, 5)  # Raw 121, 126, ..., 416; outside [60, 120] modulo 360.
 
 
 class MultiChannelGenerator:
@@ -188,24 +192,14 @@ class MultiChannelGenerator:
             # self.save_single_channel_audio(filename+f'_CH{i}', cropped_signal)
             self.save_single_channel_audio(os.path.join(filename,f'CH{i}'), cropped_signal)
 
-    def save_binaural_audio(self, filename, signals):
-        """Saves a binaural audio
-            Expecting signals[0] to be the left ear and signals[1] to be the right"""
-        if signals.shape[0] != 2:
-            raise ValueError('Input to save_binaural_audio must be left and right ear signals')
-        
-        cropped_signals = np.zeros((2, int(self.audio_length * self.sample_rate)))
-        for i, sig in enumerate(signals):
-            cropped_signals[i] = self.crop_audio_length(sig)
-        sf.write(filename+'.wav', cropped_signals.T, self.sample_rate)
-
-
     def generate_multichannel_audio(self, 
                                     room_dim, 
                                     rt60_tgt, 
                                     snr, 
                                     audio_files, 
-                                    num_interfering_sources=1, 
+                                    num_interfering_sources=1,
+                                    target_azimuth = 90, 
+                                    geometry_plan=None,
                                     with_DRR=False, 
                                     save_audio=False, 
                                     save_noise_audio=False, 
@@ -225,6 +219,8 @@ class MultiChannelGenerator:
             - "interferes": mapping of interferer IDs to audio file paths,
             - "interferer_ids": list of interferer speaker IDs.
         - num_interfering_sources: Number of interfering speakers to use. Must match the number of entries in audio_files["interferes"].
+        - target_azimuth: Azimuth angle of the target speaker in degrees, 90 degrees is directly in front of the listener.
+        - geometry_plan: Optional dictionary with fixed radii/azimuths for controlled experiments.
         - with_DRR: If True, compute the direct-to-reverberant ratio (DRR) for the target signal.
         - save_audio: If True, save the mixed multichannel audio and clean target audio.
         - save_noise_audio: If True, save the interference-only multichannel audio.
@@ -234,9 +230,13 @@ class MultiChannelGenerator:
         A metadata dictionary describing the generated sample, including speaker IDs, room settings, SNR, DRR,
         channel count, gender category, output path, and sample ID.
         """
-
+        if isinstance(num_interfering_sources, list):
+            num_interfering_sources = len(audio_files["interferer_ids"])
         source_positions = np.zeros((num_interfering_sources + 1, len(room_dim)))
         glasses_position = [room_dim[0] / 3, room_dim[1] / 2, 1.5] # michrophones set in the room
+        if geometry_plan is not None:
+            if len(geometry_plan["interferers"]) != num_interfering_sources:
+                raise ValueError("geometry_plan interferer count must match num_interfering_sources")
         
         # Room simulation with only the target speaker (For SNR scaling and saving target data)
         room_only_target = self.generate_room(room_dim, rt60_tgt)
@@ -244,7 +244,11 @@ class MultiChannelGenerator:
         
         # Add target speaker
         target_audio, _ = librosa.load(audio_files["target_file"], sr=self.sample_rate)
-        r_src, ph_src = 0.5, 90   # ph=0 is on the x+ axis, then pi increases counter clock wise
+        if geometry_plan is None:
+            r_src = random.uniform(*TARGET_RADIUS_BOUNDS)
+        else:
+            r_src = geometry_plan["target_radius"]
+        ph_src = target_azimuth  # Zero is the +x axis; 90 degrees is the array front.
         target_position, _ = self.add_speaker(room_only_target, glasses_position, target_audio,[r_src, ph_src, 0], delay=False)
         
         source_positions[0] = target_position
@@ -263,10 +267,19 @@ class MultiChannelGenerator:
         self.add_microphones(room_only_interfering, glasses_position)
 
         # Add interfering speakers with random azimuth location
+        interference_radii = []
+        interference_azimuths = []
         for n, spk in enumerate(audio_files["interferes"].keys()):
             interfering_audio, _ = librosa.load(audio_files["interferes"][spk], sr=self.sample_rate)
             # interfering_audio = self.crop_audio_length(interfering_audio) #think of adding audio augmentation
-            r_noise, ph_noise = random.choice([2.5, 3.5]), random.randrange(180, 361, 20)   # ph=0 is on the x+ axis, then pi increases counter clock wise
+            if geometry_plan is None:
+                r_noise = random.uniform(*INTERFERER_RADIUS_BOUNDS)
+                ph_noise = random.randrange(*INTERFERER_AZIMUTH_RANGE)
+            else:
+                interferer_plan = geometry_plan["interferers"][n]
+                r_noise, ph_noise = interferer_plan["radius"], interferer_plan["azimuth"]
+            interference_radii.append(float(r_noise))
+            interference_azimuths.append(int(ph_noise))
             noise_pos, _ = self.add_speaker(room_only_interfering, glasses_position, interfering_audio,[r_noise, ph_noise, 0], delay=False)
             source_positions[n+1] = noise_pos
             
@@ -365,8 +378,12 @@ class MultiChannelGenerator:
         return {"target": target_id,
                 "sentence": sentence,
                 "target_file": audio_files["target_file"],
+                "target_azimuth": target_azimuth,
+                "target_radius": r_src,
                 "target_position": [round(x, 3) for x in target_position],
                 "interferes": audio_files["interferes"],
+                "interference_azimuths": interference_azimuths,
+                "interference_radii": interference_radii,
                 "interference_positions": [[round(x, 3) for x in pos] for pos in source_positions[1:]],
                 "room_dim": room_dim,
                 "rt60": round(rt60[0][0], 1),
@@ -380,106 +397,6 @@ class MultiChannelGenerator:
                 "sample_id": sample_id
                 }
 
-    def generate_binaural_audio(self, room_dim, rt60_tgt, snr, audio_files, num_interfering_sources=1,
-                                azimuth_deg=-45.0, colatitude_deg=90.0, save_audio=True):
-
-        source_positions = np.zeros((num_interfering_sources + 1, len(room_dim)))
-
-        # Create room and microphone setup
-        room = self.generate_room(room_dim, rt60_tgt)
-        glasses_position = [room_dim[0] / 2, room_dim[1] / 2, 1.5]  # michrophones set in the middle of the room
-
-        # Add target speaker with random azimuth location
-        target_audio, target_sr = librosa.load(audio_files["target"], sr=self.sample_rate)
-        # target_audio = self.crop_audio_length(target_audio)
-        #target_audio = target_audio * (0.95 / abs(target_audio).max())
-
-        hrtf = MeasuredDirectivityFile(
-            path='mit_kemar_normal_pinna.sofa',
-            fs=self.sample_rate,
-            interp_order=12,
-            interp_n_points=1000,
-        )
-        orientation = Rotation3D([colatitude_deg, azimuth_deg], "yz", degrees=True)
-        dir_left = hrtf.get_mic_directivity("left", orientation=orientation)
-        dir_right = hrtf.get_mic_directivity("right", orientation=orientation)
-
-        room.add_microphone(np.array(glasses_position).reshape(3, 1), directivity=dir_left)
-        room.add_microphone(np.array(glasses_position).reshape(3, 1), directivity=dir_right)
-
-        target_info = audio_files["target"].split('/')
-        r_src, ph_src = 0.5, 90  # ph=0 is on the x+ axis, then pi increases counter clock wise
-        target_position, _ = self.add_speaker(room, glasses_position, target_audio,
-                                              [r_src, ph_src, 0], is_target=True)
-        source_positions[0] = target_position
-
-        if num_interfering_sources != len(audio_files["interferes"]):
-            raise ValueError(
-                'Number of wanted interfering sources must match to generated target-interference definition')
-        if self.verbose:
-            print('Target:', audio_files["target"], 'Position:', target_position)
-            print('Number of Interfering Sources:', num_interfering_sources)
-
-        # Add interfering speakers with random azimuth location
-        for n, spk in enumerate(audio_files["interferes"].keys()):
-            interfering_audio, interfering_sr = librosa.load(audio_files["interferes"][spk], sr=self.sample_rate)
-            # interfering_audio = self.crop_audio_length(interfering_audio) #think of adding audio augmentation
-            r_noise, ph_noise = random.choice([2.5, 3.5]), random.randrange(180, 361,
-                                                                            20)  # ph=0 is on the x+ axis, then pi increases counter clock wise
-            noise_pos, noise_sig = self.add_speaker(room, glasses_position, target_audio,
-                                                    [r_noise, ph_noise, 0], is_target=False, snr_db=snr,
-                                                    interefering_audio=interfering_audio)
-            if self.verbose:
-                print('Interfere:', audio_files["interferes"][spk], 'Position:', noise_pos)
-            source_positions[n + 1] = noise_pos
-
-        # Simulate and get binaural signals
-        room.simulate()
-        binaural_signals = room.mic_array.signals
-        #binaural_signals *= 0.95 / abs(binaural_signals).max()
-        #binaural_signals = (binaural_signals * 2 ** 15).astype(np.int16)
-
-        filename = 'None'
-        sample_id = audio_files["ID"]
-        sentence = target_info[2].split('.')[0]
-        # Save to file
-        if self.output_dir:
-            sampledir = self.output_dir+'_Binaural'  # f"{self.output_dir}/{sample_id}/"
-            os.makedirs(sampledir, exist_ok=True)
-            filename = os.path.join(sampledir, f"target_{target_info[1]}_{sentence}_sampleid_{sample_id}")
-            if save_audio:
-                self.save_binaural_audio(filename, binaural_signals)
-
-        rt60 = room.measure_rt60(
-            plot=False)  # measure the reverberation time, to show plot add plt.show() inside function
-
-        if self.verbose:
-            plot_room_2d(room, source_positions, np.array(glasses_position).reshape(3, 1), sample_ID=sample_id,
-                         T60=round(rt60[0][0], 1), output_dir=self.verbose_outpur_dir,directivity=True, azimuth_deg=azimuth_deg)
-            print("The desired RT60 was {}, measured was {}".format(rt60_tgt, rt60[0][0]))
-            room.plot_rir(FD=True)
-            room.plot_rir(FD=False)
-            plot_signal_at_microphones(binaural_signals, self.sample_rate, output_dir=self.verbose_outpur_dir, binaural=True)
-
-        genders = get_gender_category(audio_files["target_id"], audio_files["interferer_ids"])
-
-        # Print meta data
-        if self.verbose:
-            print(
-                "sample_id:", sample_id,
-                "target:", audio_files["target"],
-                "target_position:", [round(x, 3) for x in target_position],
-                "interferes:", audio_files["interferes"],
-                "interference_positions:", [[round(x, 3) for x in pos] for pos in source_positions[1:]],
-                "azimuth_deg:", azimuth_deg,
-                "room_dim:", room_dim,
-                "rt60:", round(rt60[0][0], 1),
-                "snr:", snr,
-                "gender:", genders,
-                "file:", filename
-            )
-
-        return
 
 def chk_speaker_position_in_room(position, Lx, Ly, glasses_position):
     '''check speaker position in room.

@@ -246,11 +246,9 @@ def EDA_main(dataset_dir, output_dir, simulation):
 
 if __name__ == '__main__':
     # Load your dataset
-    dataset_dir = os.path.join('/gpfs0/bgu-br/users/yaffedan/MultiChannelAudioGenerater', 'Reverb_Babble', 'dataset.json')  # Replace with meta data .json file
+    dataset_dir = os.path.join('/gpfs0/bgu-br/users/yaffedan/MultiChannelAudioGenerater', 'Reverb_Babble_test', 'dataset.json')  # Replace with meta data .json file
     output_dir = "EDA_plots"
 
     EDA_main(dataset_dir, output_dir, simulation='room')
-    # snr_distribution_by_split(dataset_dir, 
-    #                           output_dir="MultiChannelAudioGenerater/EDA_data_splits")
 
 

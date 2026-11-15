@@ -10,6 +10,8 @@ import random
 pg.init()
 pg.display.set_caption('MoviePy')
 import json
+import re
+import h5py
 
 PARENT_FOLDER = '/gpfs0/bgu-br/users/yaffedan/MultiChannelAudioGenerater'
 
@@ -132,7 +134,7 @@ def plot_signal_at_microphones(mic_signals, fs, start=0, output_dir=None, binaur
     plt.figure(figsize=(15, 10))
     step_size = 0.2  # X-axis tick interval
     for i in range(mic_signals.shape[0]):
-        plt.subplot(5, 1, i + 1)
+        plt.subplot(mic_signals.shape[0], 1, i + 1)
         end = len(mic_signals[i])
         time_axis = np.arange(start, end) / fs  # Time in seconds
         mic_signal = mic_signals[i, start:end]
@@ -365,3 +367,49 @@ def get_gender_category(target_id, interferer_ids):
         return 'mixed'
     else:
         raise ValueError(f"Unknown genders for speaker ID: {all_ids}")
+
+
+
+def load_target_set(h5_path, data_path):
+    """
+    Returns a set of (target_id, target_sentence) tuples, e.g. {("s16", "bbwr4s"), ...}
+    extracted from the ".h5" video paths.
+    """
+    with h5py.File(h5_path, "r") as h5f:
+        raw_paths = list(h5f["videos_path"][:])
+    video_paths = [os.path.join(data_path, p.decode("utf-8")) for p in raw_paths]
+
+    test_targets = set()
+    unmatched = []
+    for vp in video_paths:
+        vp_split = (vp.split(".")[0]).split("/")[-3:]  
+        test_targets.add((vp_split[-2], vp_split[-1]))
+
+    print(f"Loaded {len(test_targets)} targets from {h5_path}")
+    return test_targets
+
+TARGET_ID_KEY = "target_id"
+TARGET_SENTENCE_KEY = "target_sentence"
+
+def filter_speaker_pairs_to_test(speaker_pairs, test_targets):
+    """
+    Keeps only speaker_pairs entries whose target matches one of the test_targets.
+    """
+    filtered = []
+    missing_targets = set(test_targets)  # track which test targets are actually covered
+
+    for entry in speaker_pairs:
+        key = (entry[TARGET_ID_KEY], entry[TARGET_SENTENCE_KEY])
+        if key in test_targets:
+            filtered.append(entry)
+            missing_targets.discard(key)
+
+    print(f"Kept {len(filtered)}/{len(speaker_pairs)} speaker_pairs entries matching *.h5 targets.")
+
+    if missing_targets:
+        print(f"WARNING: {len(missing_targets)} *.h5 targets have NO matching entry in speaker_pairs "
+              f"(they won't be generated). Example missing targets:")
+        for t in list(missing_targets)[:5]:
+            print("  ", t)
+
+    return filtered
